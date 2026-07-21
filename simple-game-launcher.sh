@@ -152,6 +152,7 @@ class SimpleGameLauncher(tk.Tk):
         self.proton_versions = {}
         self.find_proton_versions()
         self.umu_path = self.find_umu_binary()
+        self.slr_sniper_path = self.find_slr_sniper()
 
         self.create_widgets()
         self.populate_game_list()
@@ -228,6 +229,19 @@ class SimpleGameLauncher(tk.Tk):
         for path in common_paths:
             if os.path.exists(path):
                 return path
+        return None
+
+    def find_slr_sniper(self):
+        steam_paths = [
+            os.path.expanduser("~/.local/share/Steam"),
+            os.path.expanduser("~/.steam/steam"),
+            os.path.expanduser("~/.steam/root"),
+            os.path.expanduser("~/.var/app/com.valvesoftware.Steam/data/Steam")
+        ]
+        for base in steam_paths:
+            entry_point = os.path.join(base, "steamapps", "common", "SteamLinuxRuntime_sniper", "_v2-entry-point")
+            if os.path.exists(entry_point):
+                return entry_point
         return None
 
     def create_widgets(self):
@@ -730,6 +744,10 @@ class SimpleGameLauncher(tk.Tk):
         else:
             use_umu_var.set(False)
 
+        use_slr_sniper_var = tk.BooleanVar(value=game_data.get("use_slr_sniper", False))
+        slr_sniper_check = ttk.Checkbutton(options_frame, text="Use Steam Linux Runtime - Sniper", variable=use_slr_sniper_var)
+        slr_sniper_check.pack(side=tk.TOP, anchor="w", pady=(0, 2))
+
         enable_dxvk_vkd3d_var = tk.BooleanVar(value=game_data.get("enable_dxvk_vkd3d", False))
         dxvk_vkd3d_check = ttk.Checkbutton(options_frame, text="Enable DXVK & VKD3D (WINEDLLOVERRIDES)", variable=enable_dxvk_vkd3d_var)
         dxvk_vkd3d_check.pack(side=tk.TOP, anchor="w", pady=(0, 2))
@@ -771,6 +789,7 @@ class SimpleGameLauncher(tk.Tk):
             result["prefix"] = "" if use_default_prefix_var.get() else prefix_var.get().strip()
             result["use_wow64"] = use_wow64_var.get()
             result["use_umu"] = use_umu_var.get()
+            result["use_slr_sniper"] = use_slr_sniper_var.get()
             result["enable_dxvk_vkd3d"] = enable_dxvk_vkd3d_var.get()
             result["env"] = env_var.get().strip()
             result["mangohud_args"] = mangohud_var.get().strip()
@@ -864,12 +883,15 @@ class SimpleGameLauncher(tk.Tk):
         exe_path = game["path"]
         gamescope_args = game.get("gamescope_args", "")
         mangohud_args = game.get("mangohud_args", "")
+        use_slr = game.get("use_slr_sniper", False)
 
         cmd_parts = []
         if gamescope_args:
             cmd_parts.extend(["gamescope"] + gamescope_args.split() + ["--"])
         if mangohud_args:
             cmd_parts.append("mangohud")
+        if use_slr:
+            cmd_parts.extend(['"$HOME/.local/share/Steam/steamapps/common/SteamLinuxRuntime_sniper/_v2-entry-point"', '--'])
         cmd_parts.extend(runner_cmd)
         cmd_parts.append(f'"{exe_path}"')
 
@@ -1078,6 +1100,9 @@ cd "{os.path.dirname(exe_path)}"
         mangohud_args = game.get("mangohud_args", "")
         if mangohud_args:
             cmd.append("mangohud")
+
+        if game.get("use_slr_sniper", False) and self.slr_sniper_path:
+            cmd.extend([self.slr_sniper_path, "--"])
 
         cmd.extend(runner_cmd)
         cmd.append(exe_path)
