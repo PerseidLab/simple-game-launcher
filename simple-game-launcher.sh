@@ -4,15 +4,130 @@ export SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1
 export SDL_GAMECONTROLLER_IGNORE_DEVICES="$SDL_GAMECONTROLLER_IGNORE_DEVICES,0x057e/0x2009,0x057e/0x2006,0x057e/0x2007,0x0e6f/0x0180,0x0e6f/0x0184,0x0e6f/0x0185,0x0e6f/0x0188,0x20d6/0xa711,0x20d6/0xa712,0x20d6/0xa713"
 
 exec python3 - <<'END_PYTHON'
-#!/usr/env/python3
 import os
 import sys
 import json
 import time
 import shutil
 import subprocess
+import threading
+import tarfile
+import urllib.request
+import urllib.error
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+def fetch_proton_releases():
+    all_releases = []
+
+    ge_url = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases?per_page=100"
+    try:
+        req = urllib.request.Request(
+            ge_url,
+            headers={"User-Agent": "SimpleGameLauncher-ProtonManager"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            for item in data:
+                tag_name = item.get("tag_name")
+                tarball_url = None
+                for asset in item.get("assets", []):
+                    name = asset.get("name", "")
+                    if name.endswith(".tar.gz") and not name.endswith(".sha512sum"):
+                        tarball_url = asset.get("browser_download_url")
+                        break
+                if tag_name and tarball_url:
+                    all_releases.append({
+                        "provider": "GE-Proton",
+                        "tag": tag_name,
+                        "url": tarball_url
+                    })
+    except Exception as e:
+        print(f"Error fetching GE-Proton releases: {e}")
+
+    dw_url = "https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases?limit=100"
+    try:
+        req = urllib.request.Request(
+            dw_url,
+            headers={"User-Agent": "SimpleGameLauncher-ProtonManager"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            for item in data:
+                tag_name = item.get("tag_name") or item.get("name")
+                tarball_url = None
+                for asset in item.get("assets", []):
+                    name = asset.get("name", "")
+                    if (name.endswith(".tar.gz") or name.endswith(".tar.xz")) and not name.endswith(".sha512sum"):
+                        tarball_url = asset.get("browser_download_url")
+                        break
+                if tag_name and tarball_url:
+                    all_releases.append({
+                        "provider": "DW-Proton",
+                        "tag": tag_name,
+                        "url": tarball_url
+                    })
+    except Exception as e:
+        print(f"Error fetching DW-Proton releases: {e}")
+
+    cachy_url = "https://api.github.com/repos/CachyOS/proton-cachyos/releases?per_page=100"
+    try:
+        req = urllib.request.Request(
+            cachy_url,
+            headers={"User-Agent": "SimpleGameLauncher-ProtonManager"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            for item in data:
+                tag_name = item.get("tag_name")
+                tarball_url = None
+                for asset in item.get("assets", []):
+                    name = asset.get("name", "")
+                    if (name.endswith(".tar.gz") or name.endswith(".tar.xz")) and not name.endswith(".sha512sum") and "arm64" not in name:
+                        tarball_url = asset.get("browser_download_url")
+                        if "_x86_64." in name or name.endswith(".tar.gz"):
+                            break
+                if tag_name and not tarball_url:
+                    for asset in item.get("assets", []):
+                        name = asset.get("name", "")
+                        if (name.endswith(".tar.gz") or name.endswith(".tar.xz")) and not name.endswith(".sha512sum") and "arm64" not in name:
+                            tarball_url = asset.get("browser_download_url")
+                            break
+                if tag_name and tarball_url:
+                    all_releases.append({
+                        "provider": "Proton-CachyOS",
+                        "tag": tag_name,
+                        "url": tarball_url
+                    })
+    except Exception as e:
+        print(f"Error fetching Proton-CachyOS releases: {e}")
+
+    em_url = "https://api.github.com/repos/Etaash-mathamsetty/Proton/releases?per_page=100"
+    try:
+        req = urllib.request.Request(
+            em_url,
+            headers={"User-Agent": "SimpleGameLauncher-ProtonManager"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            for item in data:
+                tag_name = item.get("tag_name")
+                tarball_url = None
+                for asset in item.get("assets", []):
+                    name = asset.get("name", "")
+                    if (name.endswith(".tar.gz") or name.endswith(".tar.xz")) and not name.endswith(".sha512sum"):
+                        tarball_url = asset.get("browser_download_url")
+                        break
+                if tag_name and tarball_url:
+                    all_releases.append({
+                        "provider": "Proton-EM",
+                        "tag": tag_name,
+                        "url": tarball_url
+                    })
+    except Exception as e:
+        print(f"Error fetching Proton-EM releases: {e}")
+
+    return all_releases
 
 class SimpleGameLauncher(tk.Tk):
     def __init__(self):
@@ -20,7 +135,7 @@ class SimpleGameLauncher(tk.Tk):
 
         self.app_name = "Simple Game Launcher"
         self.title(self.app_name)
-        self.minsize(640, 400)
+        self.minsize(680, 420)
 
         self.config_dir = os.path.expanduser("~/.local/share/simple-game-launcher")
         self.config_file = os.path.join(self.config_dir, "config.json")
@@ -30,7 +145,7 @@ class SimpleGameLauncher(tk.Tk):
         os.makedirs(self.default_prefix_dir, exist_ok=True)
 
         self.config = self.load_config()
-        self.geometry(self.config.get("geometry", "680x440"))
+        self.geometry(self.config.get("geometry", "720x460"))
 
         self.running_processes = {}
         self.process_start_times = {}
@@ -52,14 +167,14 @@ class SimpleGameLauncher(tk.Tk):
                     return json.load(f)
             except Exception:
                 pass
-        return {"geometry": "680x440", "games": []}
+        return {"geometry": "720x460", "games": []}
 
     def save_config(self):
         self.config["geometry"] = self.geometry()
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4)
-        except Exception as e:
+        except Exception:
             pass
 
     def on_exit(self):
@@ -97,7 +212,7 @@ class SimpleGameLauncher(tk.Tk):
             if os.path.exists(comp_dir):
                 for item in os.listdir(comp_dir):
                     item_path = os.path.join(comp_dir, item)
-                    if os.path.isdir(item_path) and os.path.exists(os.path.join(item_path, "proton")):
+                    if os.path.isdir(item_path) and (os.path.exists(os.path.join(item_path, "proton")) or os.path.exists(os.path.join(item_path, "version"))):
                         self.proton_versions[item] = item_path
 
     def find_umu_binary(self):
@@ -170,7 +285,6 @@ class SimpleGameLauncher(tk.Tk):
 
         self.tree.bind("<Button-3>", self.show_context_menu_mouse)
         self.tree.bind("<Button-2>", self.show_context_menu_mouse)
-
         self.bind("<Button-1>", self.dismiss_context_menu)
 
         btn_frame = ttk.Frame(self)
@@ -185,10 +299,214 @@ class SimpleGameLauncher(tk.Tk):
         self.btn_stop = ttk.Button(btn_frame, text="⏹ Stop", command=self.stop_game)
         self.btn_stop.pack(side=tk.LEFT, padx=5)
 
+        self.btn_proton_mgr = ttk.Button(btn_frame, text="⚙️ Proton Manager", command=self.open_proton_manager)
+        self.btn_proton_mgr.pack(side=tk.LEFT, padx=5)
+
         self.btn_exit = ttk.Button(btn_frame, text="Exit", command=self.on_exit)
         self.btn_exit.pack(side=tk.RIGHT, padx=5)
 
         self.tree.focus_set()
+
+    def open_proton_manager(self):
+        manager_win = tk.Toplevel(self)
+        manager_win.title("Proton Manager")
+        manager_win.geometry("660x480")
+        manager_win.minsize(540, 400)
+        manager_win.transient(self)
+        manager_win.grab_set()
+
+        manager_win.columnconfigure(0, weight=1)
+        manager_win.rowconfigure(1, weight=1)
+
+        top_frame = ttk.Frame(manager_win, padding=10)
+        top_frame.grid(row=0, column=0, sticky="ew")
+        top_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(top_frame, text="Repository:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        repo_var = tk.StringVar(value="GE-Proton")
+        repo_combo = ttk.Combobox(
+            top_frame,
+            textvariable=repo_var,
+            values=["GE-Proton", "DW-Proton", "Proton-CachyOS", "Proton-EM"],
+            state="readonly",
+            width=20
+        )
+        repo_combo.grid(row=0, column=1, sticky="w", padx=(0, 10))
+
+        info_label = ttk.Label(top_frame, text="Initializing...", font=("Arial", 9, "italic"))
+        info_label.grid(row=0, column=2, sticky="e")
+
+        frame = ttk.Frame(manager_win, padding=(10, 0, 10, 10))
+        frame.grid(row=1, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        columns = ("version", "status", "tag")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        tree.heading("version", text="Release Tag / Version")
+        tree.heading("status", text="Status")
+        tree.heading("tag", text="Internal Folder ID")
+
+        tree.column("version", width=240, anchor="w")
+        tree.column("status", width=120, anchor="center")
+        tree.column("tag", width=200, anchor="center")
+
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        btn_action_frame = ttk.Frame(manager_win, padding=10)
+        btn_action_frame.grid(row=2, column=0, sticky="ew")
+
+        status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(manager_win, textvariable=status_var, font=("Arial", 8, "italic"), padding=(10, 0))
+        status_bar.grid(row=3, column=0, sticky="w", pady=(0, 5))
+
+        releases_cache = []
+
+        def populate_tree_for_current_repo():
+            tree.delete(*tree.get_children())
+            selected_provider = repo_var.get()
+            self.find_proton_versions()
+
+            filtered = [r for r in releases_cache if r["provider"] == selected_provider]
+            for rel in filtered:
+                tag = rel["tag"]
+                is_installed = tag in self.proton_versions
+                status_text = "Installed 🟢" if is_installed else "Not Installed"
+                tree.insert("", tk.END, values=(tag, status_text, tag))
+            info_label.config(text=f"Loaded {len(filtered)} versions for {selected_provider}.")
+
+        def load_releases():
+            info_label.config(text="Fetching up to 100 releases online...")
+            releases = fetch_proton_releases()
+            releases_cache.clear()
+            releases_cache.extend(releases)
+            manager_win.after(0, populate_tree_for_current_repo)
+
+        repo_combo.bind("<<ComboboxSelected>>", lambda e: populate_tree_for_current_repo())
+        threading.Thread(target=load_releases, daemon=True).start()
+
+        steam_paths = [
+            os.path.expanduser("~/.local/share/Steam"),
+            os.path.expanduser("~/.steam/steam"),
+            os.path.expanduser("~/.steam/root"),
+            os.path.expanduser("~/.var/app/com.valvesoftware.Steam/data/Steam")
+        ]
+        target_comp_dir = None
+        for base_path in steam_paths:
+            if os.path.exists(base_path):
+                target_comp_dir = os.path.join(base_path, "compatibilitytools.d")
+                break
+        if not target_comp_dir:
+            target_comp_dir = os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")
+
+        def browse_compatibility_tools():
+            os.makedirs(target_comp_dir, exist_ok=True)
+            try:
+                subprocess.Popen(["xdg-open", target_comp_dir])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open compatibilitytools.d folder:\n{str(e)}", parent=manager_win)
+
+        def install_selected():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("Warning", "Please select a Proton version to install.", parent=manager_win)
+                return
+            item_values = tree.item(selected[0], "values")
+            tag = item_values[0]
+
+            target_url = None
+            for rel in releases_cache:
+                if rel["tag"] == tag and rel["provider"] == repo_var.get():
+                    target_url = rel["url"]
+                    break
+
+            if not target_url:
+                messagebox.showerror("Error", "Could not find download URL for this version.", parent=manager_win)
+                return
+
+            if tag in self.proton_versions:
+                messagebox.showinfo("Info", f"{tag} is already installed.", parent=manager_win)
+                return
+
+            os.makedirs(target_comp_dir, exist_ok=True)
+
+            def do_download():
+                try:
+                    manager_win.after(0, lambda: status_var.set(f"Downloading {tag}..."))
+                    temp_archive = os.path.join(self.config_dir, f"{tag}.tar.gz" if target_url.endswith(".tar.gz") else f"{tag}.tar.xz")
+
+                    req = urllib.request.Request(target_url, headers={"User-Agent": "SimpleGameLauncher"})
+                    with urllib.request.urlopen(req) as resp, open(temp_archive, 'wb') as out_file:
+                        shutil.copyfileobj(resp, out_file)
+
+                    manager_win.after(0, lambda: status_var.set(f"Extracting {tag} to compatibilitytools.d..."))
+                    if temp_archive.endswith(".tar.gz"):
+                        with tarfile.open(temp_archive, 'r:gz') as tar:
+                            tar.extractall(path=target_comp_dir)
+                    else:
+                        with tarfile.open(temp_archive, 'r:xz') as tar:
+                            tar.extractall(path=target_comp_dir)
+
+                    if os.path.exists(temp_archive):
+                        os.remove(temp_archive)
+
+                    def finish():
+                        status_var.set(f"Successfully installed {tag}!")
+                        self.find_proton_versions()
+                        tree.set(selected[0], "status", "Installed 🟢")
+                        messagebox.showinfo("Success", f"{tag} has been installed successfully!", parent=manager_win)
+
+                    manager_win.after(0, finish)
+                except Exception as e:
+                    manager_win.after(0, lambda: messagebox.showerror("Download Error", f"Failed to download/install {tag}:\n{str(e)}", parent=manager_win))
+                    manager_win.after(0, lambda: status_var.set("Installation failed."))
+
+            threading.Thread(target=do_download, daemon=True).start()
+
+        def delete_selected():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("Warning", "Please select a Proton version to delete.", parent=manager_win)
+                return
+            item_values = tree.item(selected[0], "values")
+            tag = item_values[0]
+
+            if tag not in self.proton_versions:
+                messagebox.showinfo("Info", f"{tag} is not installed.", parent=manager_win)
+                return
+
+            if not messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete {tag} from disk?", parent=manager_win):
+                return
+
+            try:
+                proton_path = self.proton_versions[tag]
+                if os.path.exists(proton_path):
+                    shutil.rmtree(proton_path)
+                self.find_proton_versions()
+                tree.set(selected[0], "status", "Not Installed")
+                status_var.set(f"Deleted {tag}")
+                messagebox.showinfo("Success", f"Successfully deleted {tag}.", parent=manager_win)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete {tag}:\n{str(e)}", parent=manager_win)
+
+        btn_install = ttk.Button(btn_action_frame, text="⬇ Install", command=install_selected)
+        btn_install.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_delete = ttk.Button(btn_action_frame, text="🗑️ Delete", command=delete_selected)
+        btn_delete.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_browse_tools = ttk.Button(btn_action_frame, text="📁 Browse Folder", command=browse_compatibility_tools)
+        btn_browse_tools.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_refresh = ttk.Button(btn_action_frame, text="🔄 Refresh", command=lambda: threading.Thread(target=load_releases, daemon=True).start())
+        btn_refresh.pack(side=tk.LEFT)
+
+        btn_close = ttk.Button(btn_action_frame, text="Close", command=manager_win.destroy)
+        btn_close.pack(side=tk.RIGHT)
 
     def on_tree_double_click(self, event):
         item = self.tree.identify_row(event.y)
@@ -464,7 +782,6 @@ class SimpleGameLauncher(tk.Tk):
         save_btn.grid(row=9, column=0, columnspan=3, pady=10)
 
         dialog.bind("<Return>", on_save)
-
         dialog.update_idletasks()
         dialog.geometry("")
         self.wait_window(dialog)
@@ -504,7 +821,6 @@ class SimpleGameLauncher(tk.Tk):
         original_game = self.config["games"][index]
 
         new_game = original_game.copy()
-
         new_game["name"] = f"{new_game['name']} (Copy)"
         new_game["playtime_minutes"] = 0
 
