@@ -147,7 +147,7 @@ class SimpleGameLauncher(tk.Tk):
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.grid(row=1, column=1, sticky="ns", pady=5, padx=(0, 10))
 
-        self.tree.bind("<Double-1>", lambda event: self.play_game())
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Return>", lambda event: self.play_game())
         self.tree.bind("<Shift-F10>", self.show_context_menu_keyboard)
         self.tree.bind("<Menu>", self.show_context_menu_keyboard)
@@ -189,6 +189,12 @@ class SimpleGameLauncher(tk.Tk):
         self.btn_exit.pack(side=tk.RIGHT, padx=5)
 
         self.tree.focus_set()
+
+    def on_tree_double_click(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.play_game()
 
     def show_context_menu_mouse(self, event):
         item = self.tree.identify_row(event.y)
