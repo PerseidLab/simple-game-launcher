@@ -3,7 +3,8 @@
 export SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1
 export SDL_GAMECONTROLLER_IGNORE_DEVICES="$SDL_GAMECONTROLLER_IGNORE_DEVICES,0x057e/0x2009,0x057e/0x2006,0x057e/0x2007,0x0e6f/0x0180,0x0e6f/0x0184,0x0e6f/0x0185,0x0e6f/0x0188,0x20d6/0xa711,0x20d6/0xa712,0x20d6/0xa713"
 
-exec python3 - <<'END_PYTHON'
+SCRIPT_PATH="$(readlink -f "$0")"
+exec python3 - "$SCRIPT_PATH" "$@" <<'END_PYTHON'
 import os
 import sys
 import json
@@ -129,6 +130,155 @@ def fetch_proton_releases():
 
     return all_releases
 
+def update_mime_registration(enabled, script_path):
+    app_dir = os.path.expanduser("~/.local/share/applications")
+    os.makedirs(app_dir, exist_ok=True)
+    desktop_file_path = os.path.join(app_dir, "simple-game-launcher-exe.desktop")
+
+    if enabled:
+        desktop_content = f"""[Desktop Entry]
+Type=Application
+Name=Simple Game Launcher (EXE Runner)
+Exec=bash -c '"{script_path}" "%f"'
+MimeType=application/x-ms-dos-executable;application/x-wine-extension-exe;
+NoDisplay=true
+Terminal=false
+Categories=Game;
+"""
+        try:
+            with open(desktop_file_path, "w", encoding="utf-8") as f:
+                f.write(desktop_content)
+            os.chmod(desktop_file_path, 0o755)
+
+            subprocess.run(["xdg-mime", "default", "simple-game-launcher-exe.desktop", "application/x-ms-dos-executable"], check=False)
+            subprocess.run(["xdg-mime", "default", "simple-game-launcher-exe.desktop", "application/x-wine-extension-exe"], check=False)
+            subprocess.run(["update-desktop-database", app_dir], check=False)
+        except Exception as e:
+            print(f"Error registering MIME: {e}")
+    else:
+        if os.path.exists(desktop_file_path):
+            try:
+                os.remove(desktop_file_path)
+                subprocess.run(["update-desktop-database", app_dir], check=False)
+            except Exception as e:
+                print(f"Error unregistering MIME: {e}")
+
+def launch_exe_via_mime(target_exe, config):
+    real_exe = os.path.realpath(target_exe)
+    if not os.path.exists(real_exe):
+        return
+
+    config_dir = os.path.expanduser("~/.local/share/simple-game-launcher")
+    default_prefix_dir = os.path.join(config_dir, "prefixes")
+
+    proton_versions = {}
+    steam_paths = [
+        os.path.expanduser("~/.local/share/Steam"),
+        os.path.expanduser("~/.steam/steam"),
+        os.path.expanduser("~/.steam/root"),
+        os.path.expanduser("~/.var/app/com.valvesoftware.Steam/data/Steam")
+    ]
+    for base_path in steam_paths:
+        comp_dir = os.path.join(base_path, "compatibilitytools.d")
+        if os.path.exists(comp_dir):
+            for item in os.listdir(comp_dir):
+                item_path = os.path.join(comp_dir, item)
+                if os.path.isdir(item_path) and (os.path.exists(os.path.join(item_path, "proton")) or os.path.exists(os.path.join(item_path, "version"))):
+                    proton_versions[item] = item_path
+
+    umu_path = shutil.which("umu-run")
+    if not umu_path:
+        for path in ["/usr/bin/umu-run", "/usr/local/bin/umu-run", os.path.expanduser("~/.local/bin/umu-run")]:
+            if os.path.exists(path):
+                umu_path = path
+                break
+
+    slr_sniper_path = None
+    for base in steam_paths:
+        entry_point = os.path.join(base, "steamapps", "common", "SteamLinuxRuntime_sniper", "_v2-entry-point")
+        if os.path.exists(entry_point):
+            slr_sniper_path = entry_point
+            break
+
+    custom_prefix = config.get("mime_prefix", "").strip()
+    if custom_prefix:
+        base_prefix = os.path.expanduser(custom_prefix)
+    else:
+        base_prefix = os.path.join(default_prefix_dir, "default")
+
+    pfx_dir = os.path.join(base_prefix, "pfx")
+    os.makedirs(pfx_dir, exist_ok=True)
+
+    proton_name = config.get("mime_proton", "")
+    custom_binary = config.get("mime_custom_binary", "").strip()
+    if not proton_name and custom_binary:
+        proton_name = "Custom"
+
+    game = {
+        "name": os.path.splitext(os.path.basename(real_exe))[0],
+        "path": real_exe,
+        "proton": proton_name,
+        "custom_binary": custom_binary,
+        "use_wow64": config.get("mime_use_wow64", False),
+        "use_umu": config.get("mime_use_umu", False) and umu_path,
+        "use_slr_sniper": config.get("mime_use_slr_sniper", False) and slr_sniper_path,
+        "env": config.get("mime_env", ""),
+        "enable_dxvk_vkd3d": config.get("mime_enable_dxvk_vkd3d", False)
+    }
+
+    env = os.environ.copy()
+    if game.get("use_wow64", False):
+        env["PROTON_USE_WOW64"] = "1"
+
+    runner_cmd = []
+    use_umu = game.get("use_umu", False) and umu_path
+
+    if use_umu:
+        env["WINEPREFIX"] = pfx_dir
+        env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+        if proton_name and proton_name != "Custom" and proton_name in proton_versions:
+            env["STEAM_COMPAT_TOOL_PATHS"] = proton_versions[proton_name]
+        runner_cmd = [umu_path]
+    elif proton_name == "Custom":
+        if os.path.exists(custom_binary):
+            env["WINEPREFIX"] = pfx_dir
+            if os.path.basename(custom_binary) == "proton":
+                env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+                env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+                runner_cmd = [custom_binary, "run"]
+            else:
+                runner_cmd = [custom_binary]
+    else:
+        env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+        env["WINEPREFIX"] = pfx_dir
+        proton_dir = proton_versions.get(proton_name)
+        if not proton_dir and proton_versions:
+            proton_dir = list(proton_versions.values())[0]
+        if proton_dir:
+            runner_cmd = [os.path.join(proton_dir, "proton"), "run"]
+
+    custom_env = game.get("env", "")
+    if custom_env:
+        for pair in custom_env.replace(";", " ").split():
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                env[k.strip()] = v.strip()
+
+    if game.get("enable_dxvk_vkd3d", False):
+        dx_overrides = "dxgi,d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core=n"
+        existing_overrides = env.get("WINEDLLOVERRIDES", "")
+        env["WINEDLLOVERRIDES"] = f"{dx_overrides};{existing_overrides}".strip(";") if existing_overrides else dx_overrides
+
+    if runner_cmd:
+        cmd = []
+        if game.get("use_slr_sniper", False) and slr_sniper_path:
+            cmd.extend([slr_sniper_path, "--"])
+        cmd.extend(runner_cmd)
+        cmd.append(real_exe)
+        subprocess.Popen(cmd, env=env, cwd=os.path.dirname(real_exe))
+
 class SimpleGameLauncher(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -136,6 +286,13 @@ class SimpleGameLauncher(tk.Tk):
         self.app_name = "Simple Game Launcher"
         self.title(self.app_name)
         self.minsize(680, 420)
+
+        self.bind_class('TEntry', '<Control-a>', self.select_all_text)
+        self.bind_class('TEntry', '<Control-A>', self.select_all_text)
+        self.bind_class('Entry', '<Control-a>', self.select_all_text)
+        self.bind_class('Entry', '<Control-A>', self.select_all_text)
+        self.bind_class('TCombobox', '<Control-a>', self.select_all_text)
+        self.bind_class('TCombobox', '<Control-A>', self.select_all_text)
 
         self.config_dir = os.path.expanduser("~/.local/share/simple-game-launcher")
         self.config_file = os.path.join(self.config_dir, "config.json")
@@ -161,6 +318,14 @@ class SimpleGameLauncher(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
+    def select_all_text(self, event):
+        try:
+            event.widget.select_range(0, tk.END)
+            event.widget.icursor(tk.END)
+        except Exception:
+            pass
+        return "break"
+
     def load_config(self):
         if os.path.exists(self.config_file):
             try:
@@ -168,7 +333,19 @@ class SimpleGameLauncher(tk.Tk):
                     return json.load(f)
             except Exception:
                 pass
-        return {"geometry": "720x460", "games": []}
+        return {
+            "geometry": "720x460",
+            "games": [],
+            "mime_enabled": False,
+            "mime_proton": "",
+            "mime_custom_binary": "",
+            "mime_env": "",
+            "mime_prefix": "",
+            "mime_use_wow64": False,
+            "mime_use_umu": False,
+            "mime_use_slr_sniper": False,
+            "mime_enable_dxvk_vkd3d": False
+        }
 
     def save_config(self):
         self.config["geometry"] = self.geometry()
@@ -316,10 +493,239 @@ class SimpleGameLauncher(tk.Tk):
         self.btn_proton_mgr = ttk.Button(btn_frame, text="⚙️ Proton Manager", command=self.open_proton_manager)
         self.btn_proton_mgr.pack(side=tk.LEFT, padx=5)
 
+        self.btn_mime_mgr = ttk.Button(btn_frame, text="🌐 MIME Settings", command=self.open_mime_settings)
+        self.btn_mime_mgr.pack(side=tk.LEFT, padx=5)
+
         self.btn_exit = ttk.Button(btn_frame, text="Exit", command=self.on_exit)
         self.btn_exit.pack(side=tk.RIGHT, padx=5)
 
         self.tree.focus_set()
+
+    def get_mime_runner_env_from_config(self, config):
+        custom_prefix = config.get("mime_prefix", "").strip()
+        if custom_prefix:
+            base_prefix = os.path.expanduser(custom_prefix)
+        else:
+            base_prefix = os.path.join(self.default_prefix_dir, "default")
+
+        pfx_dir = os.path.join(base_prefix, "pfx")
+        os.makedirs(pfx_dir, exist_ok=True)
+
+        proton_name = config.get("mime_proton", "")
+        custom_binary = config.get("mime_custom_binary", "").strip()
+        if not proton_name and custom_binary:
+            proton_name = "Custom"
+
+        env = os.environ.copy()
+        if config.get("mime_use_wow64", False):
+            env["PROTON_USE_WOW64"] = "1"
+
+        runner_cmd = []
+        use_umu = config.get("mime_use_umu", False) and self.umu_path
+
+        if use_umu:
+            env["WINEPREFIX"] = pfx_dir
+            env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+            if proton_name and proton_name != "Custom" and proton_name in self.proton_versions:
+                env["STEAM_COMPAT_TOOL_PATHS"] = self.proton_versions[proton_name]
+            runner_cmd = [self.umu_path]
+        elif proton_name == "Custom":
+            if not custom_binary:
+                raise FileNotFoundError("Custom binary path is empty.")
+            if not os.path.exists(custom_binary):
+                raise FileNotFoundError(f"Custom binary not found:\n{custom_binary}")
+            env["WINEPREFIX"] = pfx_dir
+            if os.path.basename(custom_binary) == "proton":
+                env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+                env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+                runner_cmd = [custom_binary, "run"]
+            else:
+                runner_cmd = [custom_binary]
+        else:
+            env["STEAM_COMPAT_DATA_PATH"] = base_prefix
+            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
+            env["WINEPREFIX"] = pfx_dir
+            proton_dir = self.proton_versions.get(proton_name)
+            if not proton_dir:
+                raise FileNotFoundError(f"Assigned Proton version ({proton_name}) is no longer installed.")
+            runner_cmd = [os.path.join(proton_dir, "proton"), "run"]
+
+        custom_env = config.get("mime_env", "")
+        if custom_env:
+            for pair in custom_env.replace(";", " ").split():
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    env[k.strip()] = v.strip()
+
+        if config.get("mime_enable_dxvk_vkd3d", False):
+            dx_overrides = "dxgi,d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core=n"
+            existing_overrides = env.get("WINEDLLOVERRIDES", "")
+            env["WINEDLLOVERRIDES"] = f"{dx_overrides};{existing_overrides}".strip(";") if existing_overrides else dx_overrides
+
+        return runner_cmd, env
+
+    def open_mime_settings(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("MIME Handler Settings for .exe Files")
+        dialog.minsize(540, 480)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        form_frame = ttk.Frame(dialog, padding=15)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        form_frame.columnconfigure(1, weight=1)
+
+        mime_enabled_var = tk.BooleanVar(value=self.config.get("mime_enabled", False))
+        ttk.Checkbutton(form_frame, text="Enable MIME Implementation for .exe Files", variable=mime_enabled_var).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        ttk.Label(form_frame, text="Proton Version:").grid(row=1, column=0, sticky="e", pady=5, padx=5)
+        mime_proton_var = tk.StringVar(value=self.config.get("mime_proton", ""))
+        if not mime_proton_var.get() and self.config.get("mime_custom_binary"):
+            mime_proton_var.set("Custom")
+        elif not mime_proton_var.get():
+            mime_proton_var.set("Custom")
+
+        available_protons = ["Custom"] + sorted(list(self.proton_versions.keys()))
+        proton_combo = ttk.Combobox(form_frame, textvariable=mime_proton_var, values=available_protons, state="readonly", width=30)
+        proton_combo.grid(row=1, column=1, sticky="ew", pady=5, padx=5)
+
+        ttk.Label(form_frame, text="Custom Binary/Wine:").grid(row=2, column=0, sticky="e", pady=5, padx=5)
+        mime_custom_bin_var = tk.StringVar(value=self.config.get("mime_custom_binary", ""))
+        mime_custom_bin_entry = ttk.Entry(form_frame, textvariable=mime_custom_bin_var, width=30)
+        mime_custom_bin_entry.grid(row=2, column=1, sticky="ew", pady=5, padx=5)
+
+        def browse_mime_custom_bin():
+            filename = filedialog.askopenfilename(title="Select Custom Runner Executable", parent=dialog)
+            if filename:
+                mime_custom_bin_var.set(filename)
+
+        mime_custom_bin_btn = ttk.Button(form_frame, text="Browse", command=browse_mime_custom_bin)
+        mime_custom_bin_btn.grid(row=2, column=2, padx=5)
+
+        def update_mime_custom_bin_state(event=None):
+            if mime_proton_var.get() == "Custom":
+                mime_custom_bin_entry.configure(state="normal")
+                mime_custom_bin_btn.configure(state="normal")
+            else:
+                mime_custom_bin_entry.configure(state="disabled")
+                mime_custom_bin_btn.configure(state="disabled")
+
+        proton_combo.bind("<<ComboboxSelected>>", update_mime_custom_bin_state)
+        update_mime_custom_bin_state()
+
+        ttk.Label(form_frame, text="Env Variables:").grid(row=3, column=0, sticky="e", pady=5, padx=5)
+        mime_env_var = tk.StringVar(value=self.config.get("mime_env", ""))
+        ttk.Entry(form_frame, textvariable=mime_env_var, width=35).grid(row=3, column=1, sticky="ew", pady=5, padx=5)
+        ttk.Label(form_frame, text="(e.g., DXVK_HUD=1)", font=("Arial", 8, "italic")).grid(row=3, column=2, sticky="w", padx=5)
+
+        ttk.Label(form_frame, text="Prefix Path (Opt):").grid(row=4, column=0, sticky="e", pady=5, padx=5)
+        mime_prefix_var = tk.StringVar(value=self.config.get("mime_prefix", ""))
+        mime_prefix_entry = ttk.Entry(form_frame, textvariable=mime_prefix_var, width=30)
+        mime_prefix_entry.grid(row=4, column=1, sticky="ew", pady=5, padx=5)
+
+        prefix_btn_frame = ttk.Frame(form_frame)
+        prefix_btn_frame.grid(row=4, column=2, padx=5, sticky="w")
+
+        def browse_mime_prefix():
+            dirname = filedialog.askdirectory(title="Select MIME Prefix Directory", parent=dialog)
+            if dirname:
+                mime_prefix_var.set(dirname)
+
+        def open_mime_prefix():
+            custom_prefix = mime_prefix_var.get().strip()
+            if custom_prefix:
+                base_prefix = os.path.expanduser(custom_prefix)
+            else:
+                base_prefix = os.path.join(self.default_prefix_dir, "default")
+            pfx_dir = os.path.join(base_prefix, "pfx")
+            target_dir = pfx_dir if os.path.exists(pfx_dir) else base_prefix
+            os.makedirs(target_dir, exist_ok=True)
+            try:
+                subprocess.Popen(["xdg-open", target_dir])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open prefix folder:\n{str(e)}", parent=dialog)
+
+        ttk.Button(prefix_btn_frame, text="Browse", command=browse_mime_prefix).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(prefix_btn_frame, text="📁 Open", command=open_mime_prefix).pack(side=tk.LEFT)
+
+        ttk.Label(form_frame, text="(blank defaults to default directory)", font=("Arial", 8, "italic")).grid(row=5, column=1, sticky="w", padx=5, pady=(0, 5))
+
+        options_frame = ttk.Frame(form_frame)
+        options_frame.grid(row=6, column=1, sticky="w", pady=(0, 5), padx=5)
+
+        mime_wow64_var = tk.BooleanVar(value=self.config.get("mime_use_wow64", False))
+        ttk.Checkbutton(options_frame, text="Use PROTON_USE_WOW64", variable=mime_wow64_var).pack(side=tk.TOP, anchor="w", pady=(0, 2))
+
+        mime_umu_var = tk.BooleanVar(value=self.config.get("mime_use_umu", False))
+        umu_check = ttk.Checkbutton(options_frame, text="Use UMU (umu-run)", variable=mime_umu_var)
+        if self.umu_path:
+            umu_check.pack(side=tk.TOP, anchor="w", pady=(0, 2))
+        else:
+            mime_umu_var.set(False)
+
+        mime_slr_var = tk.BooleanVar(value=self.config.get("mime_use_slr_sniper", False))
+        ttk.Checkbutton(options_frame, text="Use Steam Linux Runtime - Sniper", variable=mime_slr_var).pack(side=tk.TOP, anchor="w", pady=(0, 2))
+
+        mime_dxvk_var = tk.BooleanVar(value=self.config.get("mime_enable_dxvk_vkd3d", False))
+        ttk.Checkbutton(options_frame, text="Enable DXVK & VKD3D (WINEDLLOVERRIDES)", variable=mime_dxvk_var).pack(side=tk.TOP, anchor="w", pady=(0, 2))
+
+        ttk.Label(form_frame, text="Prefix Tools:").grid(row=7, column=0, sticky="e", pady=5, padx=5)
+        tools_btn_frame = ttk.Frame(form_frame)
+        tools_btn_frame.grid(row=7, column=1, sticky="w", pady=5, padx=5)
+
+        def run_mime_tool(tool_name):
+            current_config = {
+                "mime_proton": mime_proton_var.get(),
+                "mime_custom_binary": mime_custom_bin_var.get().strip(),
+                "mime_env": mime_env_var.get().strip(),
+                "mime_prefix": mime_prefix_var.get().strip(),
+                "mime_use_wow64": mime_wow64_var.get(),
+                "mime_use_umu": mime_umu_var.get(),
+                "mime_use_slr_sniper": mime_slr_var.get(),
+                "mime_enable_dxvk_vkd3d": mime_dxvk_var.get()
+            }
+            try:
+                runner_cmd, env = self.get_mime_runner_env_from_config(current_config)
+                if tool_name == "winecfg":
+                    cmd = runner_cmd + ["winecfg"]
+                elif tool_name == "explorer":
+                    cmd = runner_cmd + ["explorer"]
+                elif tool_name == "regedit":
+                    cmd = runner_cmd + ["regedit"]
+                else:
+                    return
+                subprocess.Popen(cmd, env=env)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to run tool:\n{str(e)}", parent=dialog)
+
+        ttk.Button(tools_btn_frame, text="winecfg", command=lambda: run_mime_tool("winecfg")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tools_btn_frame, text="regedit", command=lambda: run_mime_tool("regedit")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tools_btn_frame, text="Wine Explorer", command=lambda: run_mime_tool("explorer")).pack(side=tk.LEFT)
+
+        def save_mime_config():
+            self.config["mime_enabled"] = mime_enabled_var.get()
+            self.config["mime_proton"] = mime_proton_var.get()
+            self.config["mime_custom_binary"] = mime_custom_bin_var.get().strip()
+            self.config["mime_env"] = mime_env_var.get().strip()
+            self.config["mime_prefix"] = mime_prefix_var.get().strip()
+            self.config["mime_use_wow64"] = mime_wow64_var.get()
+            self.config["mime_use_umu"] = mime_umu_var.get()
+            self.config["mime_use_slr_sniper"] = mime_slr_var.get()
+            self.config["mime_enable_dxvk_vkd3d"] = mime_dxvk_var.get()
+            self.save_config()
+
+            script_path = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(__file__)
+            update_mime_registration(mime_enabled_var.get(), script_path)
+
+            messagebox.showinfo("Success", "MIME settings saved and registration updated successfully!", parent=dialog)
+            dialog.destroy()
+
+        ttk.Button(form_frame, text="Save MIME Settings", command=save_mime_config).grid(row=8, column=0, columnspan=3, pady=20)
+
+        dialog.update_idletasks()
+        dialog.geometry("")
+        self.wait_window(dialog)
 
     def open_proton_manager(self):
         manager_win = tk.Toplevel(self)
@@ -587,9 +993,13 @@ class SimpleGameLauncher(tk.Tk):
                     if index in self.process_start_times:
                         del self.process_start_times[index]
 
-            runner_display = game.get("proton", "Not Set")
-            if game.get("custom_binary"):
+            proton_val = game.get("proton", "")
+            if proton_val == "Custom" and game.get("custom_binary"):
                 runner_display = f"Custom: {os.path.basename(game['custom_binary'])}"
+            elif not proton_val and game.get("custom_binary"):
+                runner_display = f"Custom: {os.path.basename(game['custom_binary'])}"
+            else:
+                runner_display = proton_val if proton_val else "Not Set"
 
             stored_mins = game.get("playtime_minutes", 0)
             if index in self.process_start_times:
@@ -680,21 +1090,38 @@ class SimpleGameLauncher(tk.Tk):
 
         ttk.Label(form_frame, text="Steam Proton:").grid(row=2, column=0, sticky="e", pady=5, padx=5)
         proton_var = tk.StringVar(value=game_data.get("proton", ""))
-        available_protons = sorted(list(self.proton_versions.keys()))
+        if not proton_var.get() and game_data.get("custom_binary"):
+            proton_var.set("Custom")
+        elif not proton_var.get():
+            proton_var.set("Custom")
+
+        available_protons = ["Custom"] + sorted(list(self.proton_versions.keys()))
         combo = ttk.Combobox(form_frame, textvariable=proton_var, values=available_protons, state="readonly", width=33)
         combo.grid(row=2, column=1, sticky="ew", pady=5, padx=5)
-        if not proton_var.get() and available_protons:
-            combo.current(0)
 
         ttk.Label(form_frame, text="Custom Binary/Wine:").grid(row=3, column=0, sticky="e", pady=5, padx=5)
         custom_bin_var = tk.StringVar(value=game_data.get("custom_binary", ""))
-        ttk.Entry(form_frame, textvariable=custom_bin_var, width=30).grid(row=3, column=1, sticky="ew", pady=5, padx=5)
+        custom_bin_entry = ttk.Entry(form_frame, textvariable=custom_bin_var, width=30)
+        custom_bin_entry.grid(row=3, column=1, sticky="ew", pady=5, padx=5)
 
         def browse_custom_bin():
             filename = filedialog.askopenfilename(title="Select Custom Runner Executable")
             if filename:
                 custom_bin_var.set(filename)
-        ttk.Button(form_frame, text="Browse", command=browse_custom_bin).grid(row=3, column=2, padx=5)
+
+        custom_bin_btn = ttk.Button(form_frame, text="Browse", command=browse_custom_bin)
+        custom_bin_btn.grid(row=3, column=2, padx=5)
+
+        def update_custom_bin_state(event=None):
+            if proton_var.get() == "Custom":
+                custom_bin_entry.configure(state="normal")
+                custom_bin_btn.configure(state="normal")
+            else:
+                custom_bin_entry.configure(state="disabled")
+                custom_bin_btn.configure(state="disabled")
+
+        combo.bind("<<ComboboxSelected>>", update_custom_bin_state)
+        update_custom_bin_state()
 
         ttk.Label(form_frame, text="Custom Prefix (Opt):").grid(row=4, column=0, sticky="e", pady=5, padx=5)
         prefix_var = tk.StringVar(value=game_data.get("prefix", ""))
@@ -777,14 +1204,17 @@ class SimpleGameLauncher(tk.Tk):
             if not path_var.get().strip():
                 messagebox.showerror("Error", "Executable path cannot be empty.", parent=dialog)
                 return
-            if not proton_var.get() and not custom_bin_var.get().strip() and not use_umu_var.get():
-                messagebox.showerror("Error", "Please pick either a Steam Proton version, Custom Binary, or enable UMU.", parent=dialog)
+            if proton_var.get() == "Custom" and not custom_bin_var.get().strip():
+                messagebox.showerror("Error", "Custom binary path cannot be empty when 'Custom' is selected.", parent=dialog)
+                return
+            if not proton_var.get() and not use_umu_var.get():
+                messagebox.showerror("Error", "Please pick either a Proton version or enable UMU.", parent=dialog)
                 return
 
             result["name"] = name_var.get().strip()
             result["path"] = path_var.get().strip()
             result["proton"] = proton_var.get()
-            result["custom_binary"] = custom_bin_var.get().strip()
+            result["custom_binary"] = custom_bin_var.get().strip() if proton_var.get() == "Custom" else ""
             result["use_default_prefix"] = use_default_prefix_var.get()
             result["prefix"] = "" if use_default_prefix_var.get() else prefix_var.get().strip()
             result["use_wow64"] = use_wow64_var.get()
@@ -1012,8 +1442,12 @@ cd "{os.path.dirname(exe_path)}"
         if game.get("use_wow64", False):
             env["PROTON_USE_WOW64"] = "1"
 
-        runner_cmd = []
+        proton_name = game.get("proton", "")
         custom_binary = game.get("custom_binary", "").strip()
+        if not proton_name and custom_binary:
+            proton_name = "Custom"
+
+        runner_cmd = []
         use_umu = game.get("use_umu", False) and self.umu_path
 
         if use_umu:
@@ -1021,13 +1455,14 @@ cd "{os.path.dirname(exe_path)}"
             env["STEAM_COMPAT_DATA_PATH"] = base_prefix
             env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
 
-            proton_name = game.get("proton")
-            if proton_name and proton_name in self.proton_versions:
+            if proton_name and proton_name != "Custom" and proton_name in self.proton_versions:
                 proton_dir = self.proton_versions[proton_name]
                 env["STEAM_COMPAT_TOOL_PATHS"] = proton_dir
 
             runner_cmd = [self.umu_path]
-        elif custom_binary:
+        elif proton_name == "Custom":
+            if not custom_binary:
+                raise FileNotFoundError("Custom binary path is empty.")
             if not os.path.exists(custom_binary):
                 raise FileNotFoundError(f"Custom binary not found:\n{custom_binary}")
             env["WINEPREFIX"] = pfx_dir
@@ -1042,7 +1477,6 @@ cd "{os.path.dirname(exe_path)}"
             env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = os.path.expanduser("~/.steam/root")
             env["WINEPREFIX"] = pfx_dir
 
-            proton_name = game.get("proton")
             proton_dir = self.proton_versions.get(proton_name)
             if not proton_dir:
                 raise FileNotFoundError(f"Assigned Proton version ({proton_name}) is no longer installed.")
@@ -1248,6 +1682,24 @@ cd "{os.path.dirname(exe_path)}"
                 messagebox.showerror("Execution Error", f"Failed to execute file:\n{str(e)}")
 
 if __name__ == "__main__":
-    app = SimpleGameLauncher()
-    app.mainloop()
+    script_path = sys.argv[1] if len(sys.argv) > 1 else ""
+    target_exe = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if target_exe:
+        config_dir = os.path.expanduser("~/.local/share/simple-game-launcher")
+        config_file = os.path.join(config_dir, "config.json")
+        config = {}
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+
+        if config.get("mime_enabled", False):
+            launch_exe_via_mime(target_exe, config)
+        sys.exit(0)
+    else:
+        app = SimpleGameLauncher()
+        app.mainloop()
 END_PYTHON
