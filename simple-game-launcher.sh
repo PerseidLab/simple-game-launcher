@@ -294,6 +294,14 @@ class SimpleGameLauncher(tk.Tk):
         self.bind_class('TCombobox', '<Control-a>', self.select_all_text)
         self.bind_class('TCombobox', '<Control-A>', self.select_all_text)
 
+        # Right-click context menus for text boxes / input columns
+        self.bind_class('TEntry', '<Button-3>', self.show_text_context_menu)
+        self.bind_class('TEntry', '<Button-2>', self.show_text_context_menu)
+        self.bind_class('Entry', '<Button-3>', self.show_text_context_menu)
+        self.bind_class('Entry', '<Button-2>', self.show_text_context_menu)
+        self.bind_class('TCombobox', '<Button-3>', self.show_text_context_menu)
+        self.bind_class('TCombobox', '<Button-2>', self.show_text_context_menu)
+
         self.config_dir = os.path.expanduser("~/.local/share/simple-game-launcher")
         self.config_file = os.path.join(self.config_dir, "config.json")
         self.default_prefix_dir = os.path.join(self.config_dir, "prefixes")
@@ -319,12 +327,68 @@ class SimpleGameLauncher(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
     def select_all_text(self, event):
+        widget = event.widget if hasattr(event, 'widget') else event
         try:
-            event.widget.select_range(0, tk.END)
-            event.widget.icursor(tk.END)
+            widget.select_range(0, tk.END)
+            widget.icursor(tk.END)
+        except Exception:
+            try:
+                widget.selection_range(0, tk.END)
+                widget.icursor(tk.END)
+            except Exception:
+                pass
+        return "break"
+
+    def show_text_context_menu(self, event):
+        widget = event.widget
+        try:
+            widget.focus()
         except Exception:
             pass
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Cut", command=lambda: widget.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy", command=lambda: widget.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: widget.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(label="Select All", command=lambda: self.select_all_text(widget))
+
+        menu.tk_popup(event.x_root, event.y_root)
         return "break"
+
+    def copy_tree_cell(self):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        try:
+            x = self.tree.winfo_pointerx() - self.tree.winfo_rootx()
+            y = self.tree.winfo_pointery() - self.tree.winfo_rooty()
+            col = self.tree.identify_column(x)
+            col_id = int(col.replace('#', '')) - 1
+            values = self.tree.item(item, "values")
+            if 0 <= col_id < len(values):
+                text_to_copy = str(values[col_id])
+                self.clipboard_clear()
+                self.clipboard_append(text_to_copy)
+                return
+        except Exception:
+            pass
+        values = self.tree.item(item, "values")
+        if values:
+            self.clipboard_clear()
+            self.clipboard_append(str(values[0]))
+
+    def copy_tree_row(self):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        item = selection[0]
+        values = self.tree.item(item, "values")
+        if values:
+            row_text = " | ".join(str(v) for v in values)
+            self.clipboard_clear()
+            self.clipboard_append(row_text)
 
     def load_config(self):
         if os.path.exists(self.config_file):
@@ -693,6 +757,8 @@ class SimpleGameLauncher(tk.Tk):
                     cmd = runner_cmd + ["explorer"]
                 elif tool_name == "regedit":
                     cmd = runner_cmd + ["regedit"]
+                elif tool_name == "wineboot_k":
+                    cmd = runner_cmd + ["wineboot", "-k"]
                 else:
                     return
                 subprocess.Popen(cmd, env=env)
@@ -701,6 +767,7 @@ class SimpleGameLauncher(tk.Tk):
 
         ttk.Button(tools_btn_frame, text="winecfg", command=lambda: run_mime_tool("winecfg")).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(tools_btn_frame, text="regedit", command=lambda: run_mime_tool("regedit")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tools_btn_frame, text="wineboot -k", command=lambda: run_mime_tool("wineboot_k")).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(tools_btn_frame, text="Wine Explorer", command=lambda: run_mime_tool("explorer")).pack(side=tk.LEFT)
 
         def save_mime_config():
@@ -938,10 +1005,7 @@ class SimpleGameLauncher(tk.Tk):
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
-            try:
-                self.context_menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                self.context_menu.grab_release()
+            self.context_menu.tk_popup(event.x_root, event.y_root)
 
     def show_context_menu_keyboard(self, event=None):
         selection = self.tree.selection()
